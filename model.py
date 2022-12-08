@@ -283,8 +283,8 @@ class ModelWrapper(nn.Module):
             preds_scale = provided_scale
         else:
             masks, recons, kl_m = self.mask_model(coord_x, y)
-            preds_mean = masks[:, 0].view(-1, 1, 32, 32, 32)
-            preds_scale = masks[:, 1].view(-1, 1, 32, 32, 32)
+            preds_mean = masks[:, 0].view(-1, 1, h, w, d)
+            preds_scale = masks[:, 1].view(-1, 1, h, w, d)
 
         if calibrate:
             # If calibrating predictions, we want to find a thresholding quantile that achieves the best accuracy!
@@ -296,7 +296,7 @@ class ModelWrapper(nn.Module):
         recons = torch.sigmoid(recons)
         logits = torch.mean(x * preds_mean, dim=(-4, -3, -2, -1)).view(-1, 1)
         # Standard deviation is currently between 0 and 1, but it can be larger or smaller
-        scale = torch.sigmoid(torch.mean(x * preds_scale, dim=(-4, -3, -2, -1)).view(-1, 1))
+        scale = torch.mean(x * preds_scale, dim=(-4, -3, -2, -1)).view(-1, 1).exp()
 
         '''
         Calculate log P(Y|X,M), i.e. the log-likelihood of our inference objective
@@ -313,8 +313,8 @@ class ModelWrapper(nn.Module):
         '''
         recon_ll = torch.sum(bce_fn(recons, x), dim=(-3, -2, -1)).mean()
 
-        preds = torch.mean(preds_mean, dim=0).view(1, 1, 32, 32, 32)
-        mask_scale = torch.mean(preds_scale, dim=0).view(1, 1, 32, 32, 32)
+        preds = torch.mean(preds_mean, dim=0).view(1, 1, h, w, d)
+        mask_scale = torch.mean(preds_scale, dim=0).view(1, 1, h, w, d)
 
         # Calculate the accuracy of the predictions. If it is continuous, this is just MSE
         if self.continuous:
