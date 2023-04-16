@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.distributions as D
@@ -130,19 +132,26 @@ class VAE(nn.Module):
 
         self.sd = sd
         self.z_dim = z_dim
+        self.half_z = z_dim // 2
+
+        # Each layer reduces by a factor of 2, how many layers we need to get to latent space 2**3
+        self.num_layers = int(math.log2(input_size)) - 1
 
         '''
         Encoder -- You'll probably need to tweak this to get the best results, GPU memory usage, etc.
         '''
-        self.enc1 = SBlock(in_chans, sd, downsample=True)
-        self.enc2 = nn.Sequential(SBlock(sd, sd * 2, downsample=True))
-        self.enc3 = nn.Sequential(SBlock(sd * 2, sd * 4, downsample=True))
-        self.enc4 = nn.Sequential(SBlock(sd * 4, sd * 8, downsample=True))
-        self.enc5 = nn.Sequential(SBlock(sd * 8, sd * 16, downsample=True))
+        self.encoder_layers = nn.ModuleList()
+        enc_sd = self.sd
+        for l in range(self.num_layers):
+            self.encoder_layers.append(SBlock(in_chans, enc_sd, downsample=True))
+            in_chans = enc_sd
+            if l < self.num_layers - 1:
+                enc_sd *= 2
 
-        # These are the dimensions of a fully connect latent at the end of the encoder
-        self.spatial_dims = input_size // (2 ** 5)
-        self.dense_dims = self.spatial_dims ** 3 * (sd * 16)
+        # These are the dimensions of a fully connected latent at the end of the encoder
+        # TODO: might not need to always be 2 cubed
+        self.spatial_dims = input_size // (2 ** self.num_layers)
+        self.dense_dims = self.spatial_dims ** 3 * (enc_sd)
 
         '''
         Parameters of the latent space
@@ -151,34 +160,33 @@ class VAE(nn.Module):
         self.logvar = nn.Linear(self.dense_dims, z_dim)
 
         '''
-        Decoder for the inference maps
+        Decoders for the inference maps and lesion reconstructions
         '''
-        self.back_to_conv = nn.Sequential(nn.Linear(z_dim, self.dense_dims),
-                                          nn.GELU())
-        self.mu_fc2 = nn.Sequential(SBlock(sd * 16, sd * 8, upsample=True))
-        self.mu_fc3 = nn.Sequential(SBlock(sd * 8, sd * 4, upsample=True))
-        self.mu_fc4 = nn.Sequential(SBlock(sd * 4, sd * 4, upsample=True))
-        self.mu_fc5 = nn.Sequential(SBlock(sd * 4, sd * 2, upsample=True))
-        self.mu_fc6 = nn.Sequential(SBlock(sd * 2, sd, upsample=True))
-        self.mu_fc7 = nn.Sequential(nn.Conv3d(sd, int(sd / 2), kernel_size=3, stride=1, padding=1),
-                                    nn.GELU(),
-                                    nn.Conv3d(int(sd / 2), out_chans, kernel_size=1, stride=1, padding=0)
-                                    )
+        self.decoder_inference = nn.ModuleList()
+        self.decoder_reconstruction = nn.ModuleList()
+        self.decoder_inference.append(nn.Sequential(nn.Linear(self.half_z, self.dense_dims),
+                                          nn.GELU()))
+        self.decoder_reconstruction.append(nn.Sequential(nn.Linear(self.half_z, self.dense_dims),
+                                          nn.GELU()))
+        dec_sd = enc_sd
+        for l in range(self.num_layers):
+            self.decoder_inference.append(SBlock(dec_sd, dec_sd // 2, upsample=True))
+            self.decoder_reconstruction.append(SBlock(dec_sd, dec_sd // 2, upsample=True))
+            dec_sd = dec_sd // 2
 
-        '''
-        Decoder for the lesion reconstructions
-        '''
-        self.rback_to_conv = nn.Sequential(nn.Linear(z_dim, self.dense_dims),
-                                           nn.GELU())
-        self.rmu_fc2 = nn.Sequential(SBlock(sd * 16, sd * 8, upsample=True))
-        self.rmu_fc3 = nn.Sequential(SBlock(sd * 8, sd * 4, upsample=True))
-        self.rmu_fc4 = nn.Sequential(SBlock(sd * 4, sd * 4, upsample=True))
-        self.rmu_fc5 = nn.Sequential(SBlock(sd * 4, sd * 2, upsample=True))
-        self.rmu_fc6 = nn.Sequential(SBlock(sd * 2, sd, upsample=True))
-        self.rmu_fc7 = nn.Sequential(nn.Conv3d(sd, int(sd / 2), kernel_size=3, stride=1, padding=1),
-                                     nn.GELU(),
-                                     nn.Conv3d(int(sd / 2), 1, kernel_size=1, stride=1, padding=0)
-                                     )
+        # Finish both decoders
+        self.decoder_inference.append(
+            nn.Sequential(nn.Conv3d(dec_sd, int(dec_sd / 2), kernel_size=3, stride=1, padding=1),
+                          nn.GELU(),
+                          nn.Conv3d(int(dec_sd / 2), out_chans, kernel_size=1, stride=1, padding=0)
+                        )
+        )
+        self.decoder_reconstruction.append(
+            nn.Sequential(nn.Conv3d(dec_sd, int(dec_sd / 2), kernel_size=3, stride=1, padding=1),
+                          nn.GELU(),
+                          nn.Conv3d(int(dec_sd / 2), 1, kernel_size=1, stride=1, padding=0)
+                          )
+        )
 
     def sampling(self, mu, log_var):
         '''
@@ -192,44 +200,35 @@ class VAE(nn.Module):
         return eps.mul(std).add_(mu)
 
     def encoder(self, x):
-        x = self.enc1(x)
-        x = self.enc2(x)
-        x = self.enc3(x)
-        x = self.enc4(x)
-        x = self.enc5(x)
-
+        for enc_layer in self.encoder_layers:
+            x = enc_layer(x)
         x = x.view(-1, self.dense_dims)
         return self.mu(x), self.logvar(x)
 
     def decoder(self, x):
-        x = self.back_to_conv(x)
+        x = self.decoder_inference[0](x)
         x = x.view(x.size(0), -1, self.spatial_dims, self.spatial_dims, self.spatial_dims)
-        x = self.mu_fc2(x)
-        x = self.mu_fc3(x)
-        x = self.mu_fc4(x)
-        x = self.mu_fc5(x)
-        x = self.mu_fc6(x)
-        x = self.mu_fc7(x)
+        for dec_layer in self.decoder_inference[1:]:
+            x = dec_layer(x)
         return x
 
     def rdecoder(self, x):
-        x = self.rback_to_conv(x)
+        x = self.decoder_reconstruction[0](x)
         x = x.view(x.size(0), -1, self.spatial_dims, self.spatial_dims, self.spatial_dims)
-        x = self.rmu_fc2(x)
-        x = self.rmu_fc3(x)
-        x = self.rmu_fc4(x)
-        x = self.rmu_fc5(x)
-        x = self.rmu_fc6(x)
-        x = self.rmu_fc7(x)
+        for dec_layer in self.decoder_reconstruction[1:]:
+            x = dec_layer(x)
         return x
 
     def forward(self, x, y):
         mu, log_var = self.encoder(x)
         z = self.sampling(mu, log_var)
 
+        mask_z = z[:, :self.half_z]
+        recon_z = z[:, self.half_z:]
+
         kl = torch.sum(0.5 * (-log_var + torch.exp(log_var) + mu ** 2 - 1), dim=1)
 
-        return self.decoder(z), self.rdecoder(z), kl
+        return self.decoder(mask_z), self.rdecoder(recon_z), kl
 
 
 class ModelWrapper(nn.Module):
@@ -248,7 +247,11 @@ class ModelWrapper(nn.Module):
 
         # 5 input channels - X, the coordinates, and Y
         # 2 output channels - The mean and the variance of the inference maps
-        self.mask_model = VAE(input_size, sd=16, z_dim=20, out_chans=2, in_chans=5)
+        self.mask_model = VAE(input_size,
+                              sd=start_dims,
+                              z_dim=z_dim,
+                              out_chans=2,
+                              in_chans=5)
 
         self.continuous = continuous
         print(f'CONTINUOUS MODEL: {self.continuous}')
@@ -302,7 +305,8 @@ class ModelWrapper(nn.Module):
         Calculate log P(Y|X,M), i.e. the log-likelihood of our inference objective
         '''
         if self.continuous:
-            mask_ll = - D.Normal(logits, scale + 1e-5).log_prob(y).mean()
+            # mask_ll = - D.Normal(logits, scale + 1e-5).log_prob(y).mean()
+            mask_ll = torch.mean((logits - y) ** 2)
         else:
             # Don't use STD on binary case because Bernoulli has no variance -> Beta distributions work well
             probabilities = torch.sigmoid(logits)

@@ -92,7 +92,8 @@ def create_train_val_cal_loaders(images, labels, batch_size, continuous=False, s
     return train_loader, val_loader, cal_loader
 
 
-def viz_functional_parcellation(mask, grid_acc, v_idx, v, template_brain):
+def viz_functional_parcellation(mask, grid_acc, v_idx, v, template_brain, cmap='autumn',
+                                vmax=None, vmin=None):
     if v_idx == 0:
         template_slice = template_brain[:, :, v]
         template_slice = np.pad(template_slice, ((6, 6), (0, 0)),
@@ -122,6 +123,11 @@ def viz_functional_parcellation(mask, grid_acc, v_idx, v, template_brain):
         mask = np.pad(mask, ((6, 6), (6, 6)), constant_values=0)
         mask = np.rot90(mask, k=1)
 
-    mask = (mask > 0).astype(np.uint8)
-    mask = np.ma.masked_where(mask == 0, mask)
-    grid_acc.imshow(mask, cmap='autumn', alpha=0.6)
+    if cmap != 'jet':
+        mask = (mask > 0).astype(np.uint8)
+        mask = np.ma.masked_where(mask == 0, mask)
+
+    if not vmax:
+        grid_acc.imshow(mask, cmap=cmap, alpha=0.6)
+    else:
+        grid_acc.imshow(mask, cmap=cmap, alpha=0.6, vmin=vmin, vmax=vmax)
