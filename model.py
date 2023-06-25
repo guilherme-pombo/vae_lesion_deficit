@@ -256,7 +256,7 @@ class ModelWrapper(nn.Module):
         self.continuous = continuous
         print(f'CONTINUOUS MODEL: {self.continuous}')
 
-    def forward(self, x, y, val=False, provided_mask=None, provided_scale=None, t=0.5, calibrate=False):
+    def forward(self, x, y, val=False, provided_mask=None, provided_scale=None, t=0.5, calibrate=False, lesion_threshold=None):
         '''
         If doing validation you will want to use the generated inference map to gauge the accuracy of the
         predictions
@@ -297,9 +297,18 @@ class ModelWrapper(nn.Module):
 
         # The three outputs of our network -> Reconstructed lesion, Mean inference map and STD variance map
         recons = torch.sigmoid(recons)
-        logits = torch.mean(x * preds_mean, dim=(-4, -3, -2, -1)).view(-1, 1)
-        # Standard deviation is currently between 0 and 1, but it can be larger or smaller
-        scale = torch.mean(x * preds_scale, dim=(-4, -3, -2, -1)).view(-1, 1).exp()
+
+        # If a lesion threshold is provided, binarise the reconstruction according to this and calculate the predictive loss with it
+        # rather than with the original lesion
+        if lesion_threshold:
+            bin_lesion = (recons > lesion_threshold)
+            logits = torch.mean(bin_lesion * preds_mean, dim=(-4, -3, -2, -1)).view(-1, 1)
+            # Standard deviation is currently between 0 and 1, but it can be larger or smaller
+            scale = torch.mean(bin_lesion * preds_scale, dim=(-4, -3, -2, -1)).view(-1, 1).exp()
+        else:
+            logits = torch.mean(x * preds_mean, dim=(-4, -3, -2, -1)).view(-1, 1)
+            # Standard deviation is currently between 0 and 1, but it can be larger or smaller
+            scale = torch.mean(x * preds_scale, dim=(-4, -3, -2, -1)).view(-1, 1).exp()
 
         '''
         Calculate log P(Y|X,M), i.e. the log-likelihood of our inference objective
