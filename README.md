@@ -3,24 +3,37 @@ Lesion-deficit mapping/inference with VAEs
 
 Use simulation_viz.ipynb to get a good grasp of how to use this codebase
 
-## Covariate-aware substrate recovery
+## Covariate-aware substrate recovery in voxel space
 
-`covariate_substrate.ipynb` — recovering the lesion–deficit substrate when a **covariate**
-(age) both modulates the deficit and is *confounded* with lesion volume, comparing each
-method **covariate-blind vs covariate-aware** (VLSM, SVR-LSM, and the two-arm VAE with a
-covariate deficit head). Runs in Glasser-360 parcel space on a shipped 512-lesion sample.
+**`covariate_voxel.ipynb`** — recovering the lesion–deficit substrate in **4 mm MNI voxel space**,
+comparing four methods **covariate-blind vs covariate-aware** on 512 real KCH stroke lesions:
 
-The baseline/model logic lives in importable modules (the notebook just imports them):
+- **VLSM** (mass-univariate Welch-t + permutation FDR),
+- **SVR-LSM** (multivariate RBF SVR + back-projection),
+- **MLP-VAE** (the two-arm VAE, membership × importance), and
+- **Conv-VAE** — the same two-arm VAE with a **3D-convolutional** encoder/decoder (a spatial prior).
+
+Headline: the **conv-VAE recovers the substrate best** (the 3D spatial prior beats the flat MLP and
+the classical methods), and **covariate-awareness helps it** while leaking the least confound bias —
+whereas the linear methods over-correct. Covariate control follows the standard **partialing-out**
+(residualize the behaviour on the covariates) rather than appending covariates as features.
+
+Importable modules (the notebook just imports them):
 
 | module | contents |
 |---|---|
-| `covariate_deficits.py` | covariate-conditioned deficit generator (age main effect + interaction, age↔volume confound `rho`, inert sex; rules: coverage / bool_OR / hub_spoke / bool_AND) |
-| `baselines.py` | VLSM & SVR-LSM, each covariate-**blind** and **aware** (`cov=`); `dice`, `dice_at_k`, `focality`, `age_exposure`, `leakage`, thresholding |
-| `cov_vae.py` | `SubstrateVAE` two-arm VAE + covariate deficit head (covariates enter the head only, not the encoder); `fit_substrate_vae(X, y, cov=...)` |
-| `data_utils.py` | load the shipped `new_data/` sample; paint parcel maps back to a volume |
+| `voxel_data.py` | `VoxelData.load(...)` — the shipped 4 mm sample (`X`, substrate masks, centroids, coverage `mask_idx`, affine); `to_volume` for rendering |
+| `covariate_deficits.py` | covariate-conditioned deficit generator (age main effect + interaction, age↔volume confound `rho`, inert sex; rules coverage / bool_OR / hub_spoke / bool_AND) |
+| `baselines.py` | VLSM & SVR-LSM, each covariate-**blind**/**aware** (`cov=`, `cov_mode="partial"`); `dice`, `dice_at_k`, `focal_mass_mask`, `age_exposure`, `leakage` |
+| `mlp_vae.py` | two-arm MLP VAE + covariate head (`fit_parcel_vae(X, y, cov=...)`) |
+| `conv_vae.py` | two-arm **3D-conv** VAE + covariate head (`fit_conv_vae(X, y, mask_idx=, vol_shape=, cov=...)`) — GPU |
 
-Data in `new_data/` (self-contained; no external downloads): `episode_overlaps.npy`
-`(6, 512, 360)`, `substrates.npy` `(6, 360)`, `parcel_centroids.npy`, `substrate_names.txt`,
-and `glasser_360_2mm_labels.npy` (label volume for visualisation).
+Data (self-contained; no downloads): `voxel_data_sample/voxel_ds.npz` (V_cov=2541 voxels × 512
+patients + 6 substrates), `voxel_results.json` (precomputed GPU means + per-substrate), `imgs/`
+(glass-brain figures). The fast methods (VLSM / SVR-LSM / MLP-VAE) run live in the notebook; the
+conv-VAE is GPU-trained, so its numbers are precomputed (a code snippet reproduces them on a GPU).
 
 Install: `pip install -r requirements-covariate.txt`.
+
+> `covariate_substrate.ipynb` is an earlier **parcel-space** prototype of this tutorial; its shared
+> modules were refactored for the voxel version above, so it is superseded and won't run as-is.
