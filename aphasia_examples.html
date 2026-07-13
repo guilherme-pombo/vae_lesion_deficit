@@ -7811,12 +7811,18 @@ a.anchor-link {
 <strong>MLP-VAE</strong>, and the <strong>conv-VAE</strong> (3D-convolutional) — each run <strong>covariate-blind vs covariate-aware</strong>
 (age + sex as nuisance covariates, standard <em>partialing-out</em> control). The conv-VAE is the strongest
 recoverer and the one covariate-awareness reliably helps.</p>
+<blockquote>
+<p><strong>Just want to train a model on your own data?</strong> Skip to <em>Plug in your own data</em> below, or run the
+ready-made scripts <code>src/scripts/aphasia_4mm.py</code> / <code>aphasia_2mm.py</code> (lesion NIfTIs → trained
+conv-VAE → substrate NIfTI, binary or severity, covariate-aware). This notebook explains <em>what they
+do and why</em>; the scripts are the runnable version.</p>
+</blockquote>
 <p><strong>Resolution — why 4 mm here.</strong> With cohorts in the hundreds and no per-voxel ground truth, the
 binding constraint is statistical power <em>per voxel</em>. 4 mm gives a few thousand well-covered voxels
 (good power, little overfitting, tractable). 2 mm (~200k voxels) with N in the hundreds is
 underpowered per test and overfit-prone — worthwhile only as a <em>refinement</em> once 4 mm works, and
 then with aggressive coverage-restriction and the conv-VAE (whose spatial prior is what makes higher
-resolution viable). <strong>Start at 4 mm; escalate to 2 mm later.</strong></p>
+resolution viable). <strong>Start at 4 mm; escalate to 2 mm later</strong> (a 4 mm-vs-2 mm comparison is below).</p>
 <p>The conv-VAE is GPU-trained, so its maps here are <strong>precomputed</strong> on a shipped 4 mm sample; the fast
 methods (VLSM / SVR-LSM / MLP-VAE) run live at the end so you can see the exact API to plug your data
 into. Aphasia → the NeuroQuery <strong><code>language</code></strong> substrate is the ground truth in these demos.</p>
@@ -8193,7 +8199,18 @@ shrink (the 255-case severity cohort is the smaller one, so validate before trus
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="Plug-in-your-own-data-/-run-it-live">Plug in your own data / run it live<a class="anchor-link" href="#Plug-in-your-own-data-/-run-it-live">¶</a></h2><p>Everything is just <code>X</code> (an <code>N × V</code> lesion-overlap matrix), <code>y</code> (your label), and <code>cov</code> (an
+<h2 id="Plug-in-your-own-data-/-run-it-live">Plug in your own data / run it live<a class="anchor-link" href="#Plug-in-your-own-data-/-run-it-live">¶</a></h2><blockquote>
+<p><strong>Prefer a ready-to-run script?</strong> <code>src/scripts/aphasia_4mm.py</code> and <code>aphasia_2mm.py</code> do this whole
+example end-to-end — build the voxel matrix from lesion NIfTIs, train the covariate-aware conv-VAE
+(binary <strong>or</strong> <code>--outcome severity</code>), and save the recovered substrate as a NIfTI. They run on the
+shipped demo sample with no arguments, or on your cohort with <code>--lesions/--labels/--covariates</code>:</p>
+<div class="highlight"><pre><span></span>python<span class="w"> </span>src/scripts/aphasia_4mm.py<span class="w"> </span>--lesions<span class="w"> </span><span class="s1">'my_lesions/*.nii.gz'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">       </span>--labels<span class="w"> </span>y.npy<span class="w"> </span>--covariates<span class="w"> </span>age_sex.npy<span class="w"> </span>--outcome<span class="w"> </span>binary<span class="w"> </span>--out<span class="w"> </span>substrate.nii.gz
+</pre></div>
+<p>The shared pipeline is <code>src/scripts/_aphasia_train.py</code>; see the README for a SLURM array-job recipe
+to fan many fits across GPUs. The cells below show the same calls inline so you can see the API.</p>
+</blockquote>
+<p>Everything is just <code>X</code> (an <code>N × V</code> lesion-overlap matrix), <code>y</code> (your label), and <code>cov</code> (an
 <code>N × d</code> covariate matrix, e.g. <code>[age, sex]</code>). Blind = omit <code>cov</code>; aware = pass it.</p>
 <div class="highlight"><pre><span></span><span class="c1"># binary classifier (aphasia yes/no)</span>
 <span class="n">conv</span> <span class="o">=</span> <span class="n">conv_vae</span><span class="o">.</span><span class="n">fit_conv_vae</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">y_binary</span><span class="p">,</span> <span class="n">mask_idx</span><span class="o">=</span><span class="n">mask_idx</span><span class="p">,</span> <span class="n">vol_shape</span><span class="o">=</span><span class="n">vol_shape</span><span class="p">,</span> <span class="n">cov</span><span class="o">=</span><span class="n">cov</span><span class="p">,</span> <span class="n">epochs</span><span class="o">=</span><span class="mi">300</span><span class="p">)</span>  <span class="c1"># GPU</span>
@@ -8204,6 +8221,8 @@ shrink (the 255-case severity cohort is the smaller one, so validate before trus
                              <span class="n">continuous</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">epochs</span><span class="o">=</span><span class="mi">300</span><span class="p">)</span>
 <span class="n">mlp</span>  <span class="o">=</span> <span class="n">fit_parcel_vae</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">severity</span><span class="p">,</span> <span class="n">cov</span><span class="o">=</span><span class="n">cov</span><span class="p">,</span> <span class="n">continuous</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">epochs</span><span class="o">=</span><span class="mi">500</span><span class="p">)</span>
 </pre></div>
+<p>The <code>X</code> / <code>mask_idx</code> / <code>vol_shape</code> above come straight from <code>build_voxel_data(...)</code> (raw lesion
+NIfTIs → <code>VoxelData</code>) — the same call the scripts make; see the README "Bring your own data" section.</p>
 <p>A quick <strong>live</strong> run of the fast methods (VLSM + MLP-VAE) on the binary task, blind vs aware —
 this is exactly the call pattern; the conv-VAE is the same call with <code>fit_conv_vae</code> on a GPU:</p>
 </div>
