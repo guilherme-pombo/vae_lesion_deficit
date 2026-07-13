@@ -1,3 +1,4 @@
+# mlp_vae.py — two-arm (MLP) lesion-deficit VAE
 """Parcel-space substrate VAE baseline (two-arm).
 
 Faithful parcel-space port of the `vae_lesion_deficit` VAE (Pombo et al.), used
@@ -60,8 +61,14 @@ class ParcelLesionDeficitVAE(nn.Module):
 
     def forward(self, X: torch.Tensor, Y: torch.Tensor,
                 pos_weight: torch.Tensor | None,
-                cov: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(total_loss, mask_bce)`` for one full-batch step."""
+                cov: torch.Tensor | None = None,
+                continuous: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(total_loss, deficit_loss)`` for one full-batch step.
+
+        ``continuous=False`` (default) treats ``Y`` as a binary deficit (BCE head); ``True`` treats
+        it as a continuous score, e.g. symptom severity (MSE head on the standardized target). The
+        substrate readout ``E[p·w]`` is identical either way — only the deficit likelihood changes.
+        """
         h = self.enc(torch.cat([X, Y.view(-1, 1)], dim=1))
         mu, logvar = self.mu(h), self.logvar(h)
         z = mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
@@ -71,11 +78,14 @@ class ParcelLesionDeficitVAE(nn.Module):
         recon = torch.sigmoid(self.rdec(recon_z))
         overlap = (X * p * w).mean(dim=1, keepdim=True)
         if cov is None or self.d_cov == 0:
-            logits = self.overlap_scale * overlap + self.overlap_bias
+            pred = self.overlap_scale * overlap + self.overlap_bias
         else:
             scale_i = self.overlap_scale * (1.0 + cov @ self.gamma).view(-1, 1)
-            logits = scale_i * overlap + (cov @ self.beta).view(-1, 1) + self.overlap_bias
-        mask_ll = F.binary_cross_entropy_with_logits(logits, Y.view(-1, 1), pos_weight=pos_weight)
+            pred = scale_i * overlap + (cov @ self.beta).view(-1, 1) + self.overlap_bias
+        if continuous:
+            mask_ll = F.mse_loss(pred, Y.view(-1, 1))
+        else:
+            mask_ll = F.binary_cross_entropy_with_logits(pred, Y.view(-1, 1), pos_weight=pos_weight)
         recon_ll = F.binary_cross_entropy(recon, X, reduction="none").sum(dim=1).mean()
         return mask_ll + recon_ll + kl.mean(), mask_ll
 
@@ -183,11 +193,15 @@ def fit_parcel_vae(
     q_n: int = 20,
     seed: int = 0,
     readout: str = "pw",
+    continuous: bool = False,
 ) -> np.ndarray:
     """Fit the two-arm parcel VAE on one episode's ``(X, Y)``; return the ``(K,)``
     recovered substrate map.
 
-    X is the ``(N, K)`` parcel-overlap matrix; Y the ``(N,)`` binary deficit.
+    X is the ``(N, K)`` parcel-overlap matrix; Y the ``(N,)`` deficit — binary by default, or a
+    continuous score (e.g. symptom severity) when ``continuous=True`` (Y is z-scored, the deficit
+    head uses MSE, class-balancing is off, and the binary rate-calibration is skipped — the returned
+    ``pw`` map is the same effective-weight substrate readout, rank-preserving).
 
     ``readout`` selects what map is returned (default ``"pw"``):
 
@@ -210,6 +224,9 @@ def fit_parcel_vae(
     torch.manual_seed(seed)
     Xn = np.asarray(X, dtype=np.float32)
     Yn = np.asarray(Y, dtype=np.float32)
+    if continuous:  # regression target (e.g. severity): standardize, no class balancing
+        Yn = ((Yn - Yn.mean()) / (Yn.std() + 1e-8)).astype(np.float32)
+        balanced = False
     k_parcel = int(Xn.shape[1])
     Cn = None if cov is None else np.asarray(cov, dtype=np.float32)
     d_cov = 0 if Cn is None else int(Cn.shape[1])
@@ -233,7 +250,7 @@ def fit_parcel_vae(
     best_state = copy.deepcopy(model.state_dict())
     for _ in range(epochs):
         opt.zero_grad()
-        loss, mask_ll = model(x_fit, y_fit, pw, cov=cov_fit)
+        loss, mask_ll = model(x_fit, y_fit, pw, cov=cov_fit, continuous=continuous)
         loss.backward()
         opt.step()
         ll = float(mask_ll.detach())
@@ -257,11 +274,13 @@ def fit_parcel_vae(
         scores = model.effective_map(x_fit, y_fit).cpu().numpy().astype(np.float64)
     else:
         scores = model.logit_map(x_fit, y_fit).cpu().numpy().astype(np.float64)
-    if len(cal_idx) > 0:
+    if len(cal_idx) > 0 and not continuous:
         rate = _learn_substrate_rate(
             scores, Xn[cal_idx], Yn[cal_idx], q_lo=q_lo, q_hi=q_hi, q_n=q_n
         )
     else:
+        # continuous target has no binary rate to learn; use the midpoint-quantile fallback so
+        # focal_mass_mask still self-sizes (ranking / dice@k is unaffected by this scaling).
         rate = 1.0 - 0.5 * (q_lo + q_hi)
     if readout == "pw":
         # The effective weight E[p*w] has a heavy positive tail, so sigmoid
@@ -273,13 +292,3 @@ def fit_parcel_vae(
         return pos * (rate * scores.shape[0]) / s if s > 0 else pos
     offset = _center_to_rate(scores, rate)
     return _sigmoid_np(scores - offset)
-
-
-__all__ = [
-    "ParcelLesionDeficitVAE",
-    "fit_parcel_vae",
-    "_sigmoid_np",
-    "_bce_with_logits_np",
-    "_center_to_rate",
-    "_learn_substrate_rate",
-]
