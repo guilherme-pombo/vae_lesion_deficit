@@ -3,6 +3,27 @@ Lesion-deficit mapping/inference with VAEs
 
 Use simulation_viz.ipynb to get a good grasp of how to use this codebase
 
+## Setup
+
+Requires Python ≥ 3.10. With [uv](https://docs.astral.sh/uv/) (recommended — one command creates the
+virtual env and installs everything):
+
+```bash
+uv sync --extra notebook     # creates .venv/ with numpy/torch/scikit-learn/matplotlib/nibabel + Jupyter
+uv run jupyter lab           # open covariate_voxel.ipynb or aphasia_examples.ipynb
+uv run python my_script.py   # …or run any script inside the managed env
+```
+
+`uv sync` (without `--extra notebook`) installs just the compute dependencies. Run `uv lock` first if
+you want a pinned `uv.lock` for reproducibility. Everything is standard PyPI — no cloud/infra deps.
+
+Plain `pip` works too:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-covariate.txt jupyterlab
+```
+
 ## Covariate-aware substrate recovery in voxel space
 
 **`covariate_voxel.ipynb`** — recovering the lesion–deficit substrate in **4 mm MNI voxel space**,
