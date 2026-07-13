@@ -18,15 +18,21 @@ the classical methods), and **covariate-awareness helps it** while leaking the l
 whereas the linear methods over-correct. Covariate control follows the standard **partialing-out**
 (residualize the behaviour on the covariates) rather than appending covariates as features.
 
-Importable modules (the notebook just imports them):
+The code is organised under `src/` — classical **baselines** and the **dlm** (deep-lesion-mapping)
+VAEs in their own subpackages; the notebook does `sys.path.insert(0, "src")` and imports them:
 
-| module | contents |
-|---|---|
-| `voxel_data.py` | `VoxelData.load(...)` — the shipped 4 mm sample (`X`, substrate masks, centroids, coverage `mask_idx`, affine); `to_volume` for rendering |
-| `covariate_deficits.py` | covariate-conditioned deficit generator (age main effect + interaction, age↔volume confound `rho`, inert sex; rules coverage / bool_OR / hub_spoke / bool_AND) |
-| `baselines.py` | VLSM & SVR-LSM, each covariate-**blind**/**aware** (`cov=`, `cov_mode="partial"`); `dice`, `dice_at_k`, `focal_mass_mask`, `age_exposure`, `leakage` |
-| `mlp_vae.py` | two-arm MLP VAE + covariate head (`fit_parcel_vae(X, y, cov=...)`) |
-| `conv_vae.py` | two-arm **3D-conv** VAE + covariate head (`fit_conv_vae(X, y, mask_idx=, vol_shape=, cov=...)`) — GPU |
+```
+src/
+  voxel_data.py    VoxelData.load(...) — the shipped 4 mm sample (X, substrate masks,
+                   centroids, coverage mask_idx, affine); to_volume for rendering
+  deficits.py      covariate-conditioned deficit generator (age main + interaction,
+                   age↔volume confound rho, inert sex; rules coverage/bool_OR/hub_spoke/bool_AND)
+  metrics.py       dice, dice_at_k, focal_mass_mask, age_exposure, leakage
+  baselines/       VLSM (vlsm.py) & SVR-LSM (svr_lsm.py) — each covariate-blind/aware
+                   (cov=, cov_mode="partial"); shared _residualize/_fdr_bh in _common.py
+  dlm/             the two-arm VAEs — mlp_vae.py (fit_parcel_vae) and
+                   conv_vae.py (fit_conv_vae, 3D-conv; GPU), each with a covariate head
+```
 
 Data (self-contained; no downloads): `voxel_data_sample/voxel_ds.npz` (V_cov=2541 voxels × 512
 patients + 6 substrates), `voxel_results.json` (precomputed GPU means + per-substrate), `imgs/`

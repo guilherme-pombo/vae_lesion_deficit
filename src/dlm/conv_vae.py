@@ -24,7 +24,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from mlp_vae import _learn_substrate_rate
+from dlm.mlp_vae import _learn_substrate_rate
 
 
 def _pad_to_multiple(shape: tuple[int, int, int], factor: int) -> tuple[int, int, int]:
