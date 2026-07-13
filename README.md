@@ -81,7 +81,7 @@ from build_voxel import build_voxel_data
 from dlm.conv_vae import fit_conv_vae       # or dlm.mlp_vae.fit_parcel_vae (CPU-friendly)
 
 # 1. lesions -> coverage-restricted 4 mm voxel matrix (resampled through affines; nibabel only)
-data = build_voxel_data(sorted(glob("my_lesions/*.nii.gz")), min_overlap=10)   # 2 mm: pass template=<2mm ref>
+data = build_voxel_data(sorted(glob("my_lesions/*.nii.gz")), min_overlap=10)   # 2 mm: resolution_mm=2
 
 # 2. your outcome + covariates
 y   = np.load("aphasia_label.npy")          # binary {0,1}  OR  a continuous severity score
@@ -98,7 +98,53 @@ preserved for MNI-space inputs), builds the coverage mask (voxels lesioned in �
 patients), and returns a `VoxelData`. Pass `substrate_paths={name: path}` if you have ground-truth
 substrate maps to score against; omit for a purely data-driven analysis. **Resolution:** 4 mm is the
 sensible default for cohorts in the hundreds (power per voxel, less overfitting); go to 2 mm as a
-refinement (`template=<a 2 mm reference NIfTI>`) once 4 mm looks good.
+refinement (`resolution_mm=2`, or `template=<a reference NIfTI>` for a custom grid) once 4 mm looks
+good.
+
+## Ready-to-run training scripts (`src/scripts/`)
+
+Standalone torch scripts that go end-to-end — build the voxel matrix, train the covariate-aware
+conv-VAE, and write the recovered substrate as a NIfTI. They mirror `aphasia_examples.ipynb` but as
+plain `.py` you can drop on a cluster. Both run **out-of-box on the shipped demo sample** (no args
+needed) and switch to your own cohort with `--lesions/--labels/--covariates`:
+
+```bash
+# 4 mm — binary aphasia (yes/no), then continuous severity; both covariate-aware
+python src/scripts/aphasia_4mm.py                        # demo on the shipped 4 mm sample
+python src/scripts/aphasia_4mm.py --outcome severity
+
+# 2 mm — same pipeline on the finer grid (~8× more voxels; use a GPU)
+python src/scripts/aphasia_2mm.py
+
+# your own cohort: X from lesion NIfTIs, y binary-or-continuous, cov = [age, sex]
+python src/scripts/aphasia_4mm.py \
+    --lesions 'my_lesions/*.nii.gz' --labels y.npy --covariates age_sex.npy \
+    --outcome binary --out my_substrate.nii.gz
+```
+
+The two scripts differ only in a resolution config (grid + conv depth/batch); the shared pipeline is
+`src/scripts/_aphasia_train.py`. A GPU is used automatically when present (`cuda` → `mps` → `cpu`).
+
+**Running many fits in parallel (SLURM / a GPU cluster).** Each fit is one independent process, so
+fan out with an array job — one GPU per task, no inter-task communication:
+
+```bash
+#!/bin/bash
+#SBATCH --array=0-3            # 4 configs in parallel, one GPU each
+#SBATCH --gpus-per-task=1
+CONFIGS=(
+  "aphasia_4mm.py --outcome binary"
+  "aphasia_4mm.py --outcome severity"
+  "aphasia_2mm.py --outcome binary"
+  "aphasia_2mm.py --outcome severity"
+)
+srun python src/scripts/${CONFIGS[$SLURM_ARRAY_TASK_ID]} \
+     --out substrate_${SLURM_ARRAY_TASK_ID}.nii.gz
+```
+
+Sweeps over `--epochs`, `--min-overlap`, or bootstrap resamples parallelise the same way — vary the
+args per array index. (Within a single fit the conv-VAE already uses the whole GPU; parallelism buys
+you throughput *across* fits, not a faster individual fit.)
 
 > `covariate_substrate.ipynb` is an earlier **parcel-space** prototype of this tutorial; its shared
 > modules were refactored for the voxel version above, so it is superseded and won't run as-is.

@@ -32,6 +32,16 @@ MNI_4MM_AFFINE: np.ndarray = np.array(
      [0.0, 0.0, 0.0, 1.0]],
     dtype=np.float64,
 )
+# 2 mm MNI (LAS) grid, for a finer-resolution build (resolution_mm=2).
+MNI_2MM_SHAPE: tuple[int, int, int] = (91, 109, 91)
+MNI_2MM_AFFINE: np.ndarray = np.array(
+    [[-2.0, 0.0, 0.0, 90.0],
+     [0.0, 2.0, 0.0, -126.0],
+     [0.0, 0.0, 2.0, -72.0],
+     [0.0, 0.0, 0.0, 1.0]],
+    dtype=np.float64,
+)
+_GRIDS = {4: (MNI_4MM_SHAPE, MNI_4MM_AFFINE), 2: (MNI_2MM_SHAPE, MNI_2MM_AFFINE)}
 
 
 def _resample(path: Path, shape: tuple[int, int, int], affine: np.ndarray, order: int) -> np.ndarray:
@@ -44,6 +54,7 @@ def build_voxel_data(
     lesion_paths: list[str | Path],
     *,
     min_overlap: int = 10,
+    resolution_mm: int = 4,
     template: str | Path | None = None,
     substrate_paths: dict[str, str | Path] | None = None,
     substrate_thresh: float = 0.25,
@@ -58,9 +69,12 @@ def build_voxel_data(
     min_overlap:
         Coverage mask keeps voxels lesioned (>0) in at least this many patients — standard voxel-LSM
         practice (untested voxels nobody lesions carry no information) and the tractability lever.
+    resolution_mm:
+        Target isotropic resolution when ``template`` is None: ``4`` (default) or ``2``. 4 mm is the
+        sensible default for cohorts in the hundreds; 2 mm is a finer refinement (~8× more voxels).
     template:
-        Optional reference NIfTI defining the target grid; default is the 4 mm MNI grid
-        (``MNI_4MM_SHAPE`` / ``MNI_4MM_AFFINE``). Pass a 2 mm reference here to build at 2 mm.
+        Optional reference NIfTI defining the target grid; overrides ``resolution_mm``. Use this for a
+        grid that isn't the built-in 4 mm / 2 mm MNI grid.
     substrate_paths:
         Optional ``{name: path}`` of substrate maps (e.g. NeuroQuery terms) for *evaluation* — each is
         resampled, max-normalised, and thresholded at ``substrate_thresh`` within the coverage mask.
@@ -77,8 +91,10 @@ def build_voxel_data(
         t = nib.load(template)
         shape = tuple(int(s) for s in t.shape[:3])
         affine = np.asarray(t.affine, dtype=np.float64)
+    elif resolution_mm in _GRIDS:
+        shape, affine = _GRIDS[resolution_mm]
     else:
-        shape, affine = MNI_4MM_SHAPE, MNI_4MM_AFFINE
+        raise ValueError(f"resolution_mm must be 4 or 2 (got {resolution_mm}); or pass a template")
 
     vols = np.stack([np.clip(_resample(Path(p), shape, affine, order), 0.0, 1.0)
                      for p in lesion_paths])  # (N, *shape)
@@ -107,4 +123,4 @@ def build_voxel_data(
                      vol_shape=shape, affine=affine)
 
 
-__all__ = ["build_voxel_data", "MNI_4MM_SHAPE", "MNI_4MM_AFFINE"]
+__all__ = ["build_voxel_data", "MNI_4MM_SHAPE", "MNI_4MM_AFFINE", "MNI_2MM_SHAPE", "MNI_2MM_AFFINE"]
