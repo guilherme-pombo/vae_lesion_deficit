@@ -1,3 +1,4 @@
+# conv_vae.py — 3D-convolutional two-arm lesion-deficit VAE
 """3D-convolutional two-arm VAE for voxel-space substrate recovery.
 
 A convolutional counterpart to :class:`ParcelLesionDeficitVAE`, adapting the public
@@ -24,13 +25,12 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from dlm.mlp_vae import _learn_substrate_rate
+from .mlp_vae import _learn_substrate_rate
 
 
 def _pad_to_multiple(shape: tuple[int, int, int], factor: int) -> tuple[int, int, int]:
     """Smallest per-axis size >= ``shape`` divisible by ``factor`` (for clean downsampling)."""
-    sizes = [int(math.ceil(s / factor) * factor) for s in shape]
-    return (sizes[0], sizes[1], sizes[2])
+    return tuple(int(math.ceil(s / factor) * factor) for s in shape)  # type: ignore[return-value]
 
 
 def _coord_channels(shape: tuple[int, int, int], device: torch.device) -> torch.Tensor:
@@ -148,7 +148,7 @@ class ConvLesionDeficitVAE(nn.Module):
 
     def forward(self, x_vol: torch.Tensor, cov_vol: torch.Tensor, y: torch.Tensor,
                 pos_weight: torch.Tensor | None, *, cov: torch.Tensor | None = None,
-                mask_weight: float = 1.0,
+                continuous: bool = False, mask_weight: float = 1.0,
                 recon_weight: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(total_loss, mask_bce)`` for a minibatch of scattered lesion volumes.
 
@@ -173,11 +173,14 @@ class ConvLesionDeficitVAE(nn.Module):
         denom = cov_vol.sum().clamp_min(1.0)
         overlap = (x_vol * p * w * cov_vol).sum(dim=(-3, -2, -1), keepdim=False).view(-1, 1) / denom
         if cov is None or self.d_cov == 0:
-            logits = self.overlap_scale * overlap + self.overlap_bias
+            pred = self.overlap_scale * overlap + self.overlap_bias
         else:
             scale_i = self.overlap_scale * (1.0 + cov @ self.gamma).view(-1, 1)
-            logits = scale_i * overlap + (cov @ self.beta).view(-1, 1) + self.overlap_bias
-        mask_ll = F.binary_cross_entropy_with_logits(logits, y.view(-1, 1), pos_weight=pos_weight)
+            pred = scale_i * overlap + (cov @ self.beta).view(-1, 1) + self.overlap_bias
+        if continuous:  # regression target (e.g. severity): MSE on the standardized score
+            mask_ll = F.mse_loss(pred, y.view(-1, 1))
+        else:
+            mask_ll = F.binary_cross_entropy_with_logits(pred, y.view(-1, 1), pos_weight=pos_weight)
         recon_ll = (F.binary_cross_entropy(recon, x_vol, reduction="none") * cov_vol).sum(
             dim=(-4, -3, -2, -1)).mean()
         total = mask_weight * mask_ll + recon_weight * recon_ll + kl.mean()
@@ -211,11 +214,6 @@ def _pick_device(device: str | None) -> torch.device:
     return torch.device("cpu")
 
 
-def add_coords(shape: tuple[int, int, int], device: torch.device) -> torch.Tensor:
-    """``(1, 3, D, H, W)`` normalised [0,1] z/y/x coordinate channels (3D CoordConv)."""
-    return _coord_channels(shape, device)
-
-
 def fit_conv_vae(
     X: np.ndarray,
     Y: np.ndarray,
@@ -240,15 +238,16 @@ def fit_conv_vae(
     q_n: int = 20,
     seed: int = 0,
     device: str | None = None,
+    continuous: bool = False,
 ) -> np.ndarray:
     """Fit the 3D-conv two-arm VAE on one episode; return the ``(V_cov,)`` recovered substrate map.
 
-    ``X`` is the ``(N, V_cov)`` coverage-voxel lesion matrix, ``Y`` the ``(N,)`` binary deficit,
-    ``mask_idx`` the flat indices of the coverage voxels within ``vol_shape``. Optional ``cov``
-    ``(N, d_cov)`` covariates enter the deficit head ONLY (main + interaction), leaving the substrate
-    readout covariate-free (``cov=None`` reproduces the covariate-blind fit). Returns the cohort-mean
-    effective weight ``E[σ(γ)·w]`` at the coverage voxels, clamped ≥0 and mass-scaled to the learned
-    substrate rate (so ``focal_mass_mask`` self-sizes to ≈|M|) — same calibration as ``fit_parcel_vae``.
+    ``X`` is the ``(N, V_cov)`` coverage-voxel lesion matrix, ``Y`` the ``(N,)`` deficit — binary by
+    default, or a continuous score (e.g. symptom severity) when ``continuous=True`` (Y is z-scored,
+    the deficit head uses MSE, no class balancing, binary rate-calibration skipped). Optional ``cov``
+    ``(N, d_cov)`` covariates enter the deficit head ONLY, leaving the substrate readout covariate-free
+    (``cov=None`` reproduces the blind fit). Returns the cohort-mean effective weight ``E[σ(γ)·w]`` at
+    the coverage voxels, clamped ≥0 and mass-scaled (so ``focal_mass_mask`` self-sizes to ≈|M|).
     """
     torch.manual_seed(seed)
     dev = _pick_device(device)
@@ -257,6 +256,9 @@ def fit_conv_vae(
 
     Xn = np.asarray(X, dtype=np.float32)
     Yn = np.asarray(Y, dtype=np.float32)
+    if continuous:  # regression target (e.g. severity): standardize, no class balancing
+        Yn = ((Yn - Yn.mean()) / (Yn.std() + 1e-8)).astype(np.float32)
+        balanced = False
     Cn = None if cov is None else np.asarray(cov, dtype=np.float32)
     d_cov = 0 if Cn is None else int(Cn.shape[1])
     vol = _scatter_to_volume(Xn, mask_idx, vol_shape)  # (N, *vol_shape)
@@ -298,8 +300,8 @@ def fit_conv_vae(
                 continue
             opt.zero_grad()
             cb = None if cov_fit is None else cov_fit[chunk]
-            loss, _ = model(x_fit[chunk], cov_vol, y_fit[chunk], pos_weight,
-                            cov=cb, mask_weight=mask_weight, recon_weight=recon_weight)
+            loss, _ = model(x_fit[chunk], cov_vol, y_fit[chunk], pos_weight, cov=cb,
+                            continuous=continuous, mask_weight=mask_weight, recon_weight=recon_weight)
             loss.backward()
             opt.step()
         # Eval mask-BCE MINIBATCHED — a full-batch forward on all fit samples blows the
@@ -312,7 +314,7 @@ def fit_conv_vae(
                 if len(xb) < 2:
                     continue
                 cb = None if cov_fit is None else cov_fit[start:start + batch]
-                _, mb = model(xb, cov_vol, yb, pos_weight, cov=cb)
+                _, mb = model(xb, cov_vol, yb, pos_weight, cov=cb, continuous=continuous)
                 tot += float(mb) * len(xb)
                 nb += len(xb)
         ll = tot / max(nb, 1)
@@ -333,13 +335,13 @@ def fit_conv_vae(
     eff = (eff_sum / max(n_seen, 1)).cpu().numpy()  # (*pad)
     eff = eff[: vol_shape[0], : vol_shape[1], : vol_shape[2]].reshape(-1)[mask_idx]
     scores = eff.astype(np.float64)
-    if len(cal_idx) > 0:
+    if len(cal_idx) > 0 and not continuous:
         rate = _learn_substrate_rate(scores, Xn[cal_idx], Yn[cal_idx], q_lo=q_lo, q_hi=q_hi, q_n=q_n)
     else:
-        rate = 1.0 - 0.5 * (q_lo + q_hi)
+        rate = 1.0 - 0.5 * (q_lo + q_hi)  # continuous: no binary rate; ranking unaffected by scaling
     pos = np.clip(scores, 0.0, None)
     s = float(pos.sum())
     return pos * (rate * v_cov) / s if s > 0 else pos
 
 
-__all__ = ["ConvLesionDeficitVAE", "SBlock", "fit_conv_vae", "add_coords"]
+__all__ = ["ConvLesionDeficitVAE", "SBlock", "fit_conv_vae"]
