@@ -40,9 +40,17 @@ def run_aphasia(*, resolution_mm: int, conv_num_down: int, conv_batch: int,
                     help="binary classifier (BCE head) or continuous severity (MSE head)")
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--min-overlap", type=int, default=10, help="coverage-mask threshold")
-    ap.add_argument("--out", default=f"aphasia_{resolution_mm}mm_substrate.nii.gz")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="fit seed — vary it across a bag of runs, then average the output NIfTIs "
+                         "(recommended at small N; see the README small-N / bagging note)")
+    ap.add_argument("--patience", type=int, default=None,
+                    help="early-stop patience (epochs w/o held-out improvement); default runs all "
+                         "--epochs and keeps the best held-out epoch")
+    ap.add_argument("--out", default=None,
+                    help="output NIfTI (default: aphasia_<res>mm_<outcome>_seed<seed>.nii.gz)")
     args = ap.parse_args(argv)
     continuous = args.outcome == "severity"
+    out_path = args.out or f"aphasia_{resolution_mm}mm_{args.outcome}_seed{args.seed}.nii.gz"
 
     # 1. lesions -> VoxelData (X: N x V_cov coverage matrix + coverage mask + grid metadata)
     if args.lesions:
@@ -69,16 +77,16 @@ def run_aphasia(*, resolution_mm: int, conv_num_down: int, conv_batch: int,
 
     # 3. train the conv-VAE — covariate-aware if cov given; continuous (MSE) head for severity
     print(f"[train] conv-VAE  {resolution_mm} mm  outcome={args.outcome}  aware={cov is not None}  "
-          f"N={data.n_patients}  V_cov={data.n_voxels}  (num_down={conv_num_down}, batch={conv_batch}, "
-          f"epochs={args.epochs})", flush=True)
+          f"N={data.n_patients}  V_cov={data.n_voxels}  seed={args.seed}  (num_down={conv_num_down}, "
+          f"batch={conv_batch}, epochs={args.epochs}, patience={args.patience})", flush=True)
     smap = fit_conv_vae(data.X, y, mask_idx=data.mask_idx, vol_shape=data.vol_shape, cov=cov,
                         continuous=continuous, epochs=args.epochs, num_down=conv_num_down,
-                        batch=conv_batch)
+                        batch=conv_batch, seed=args.seed, patience=args.patience)
 
     # 4. save the recovered substrate map as a NIfTI (+ score vs language if this is the demo)
     import nibabel as nib
-    nib.save(nib.Nifti1Image(data.to_volume(smap).astype(np.float32), data.affine), args.out)
-    print(f"[done] substrate map -> {args.out}", flush=True)
+    nib.save(nib.Nifti1Image(data.to_volume(smap).astype(np.float32), data.affine), out_path)
+    print(f"[done] substrate map -> {out_path}", flush=True)
     if not args.labels and "language" in data.substrates:
         m = data.substrates["language"]; k = int(m.sum())
         print(f"[demo] recovery vs language substrate: Dice@k={dice_at_k(smap, m, k):.3f}  "

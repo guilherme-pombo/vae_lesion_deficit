@@ -10,9 +10,13 @@ a mean over the coverage voxels only. The recovered substrate is the cohort-mean
 weight ``E[σ(γ)·w]`` gathered back at the coverage voxels — the same calibrated, self-sizing
 readout the MLP baseline uses (see VAE_EXPERIMENTS_LOGS.md).
 
-Covariate-aware training is deferred (blind substrate recovery only for now); the deficit
-head keeps the scalar ``overlap_scale``/``overlap_bias`` so a covariate pathway can be added
-later without a rewrite.
+Covariate control is done in the deficit HEAD, not by pre-residualising the outcome: with
+``cov=(N, d_cov)`` the head adds a covariate main effect ``cov·beta`` and a substrate-interaction
+``(1 + cov·gamma)`` scaling on the overlap, fitted jointly. The conv encoder never sees the
+covariates, so the ``E[σ(γ)·w]`` substrate readout stays covariate-free (recovered controlling for
+them). This is the VAE's covariate mechanism — distinct from the VLSM/SVR baselines, which
+partial the covariates out of the behaviour before fitting; both are legitimate, they differ in
+where the control happens. ``cov=None`` reproduces the blind fit.
 """
 
 from __future__ import annotations
@@ -233,6 +237,8 @@ def fit_conv_vae(
     recon_weight: float = 1.0,
     balanced: bool = True,
     cal_frac: float = 0.2,
+    select_on: str = "val",
+    patience: int | None = None,
     q_lo: float = 0.95,
     q_hi: float = 0.99,
     q_n: int = 20,
@@ -248,7 +254,16 @@ def fit_conv_vae(
     ``(N, d_cov)`` covariates enter the deficit head ONLY, leaving the substrate readout covariate-free
     (``cov=None`` reproduces the blind fit). Returns the cohort-mean effective weight ``E[σ(γ)·w]`` at
     the coverage voxels, clamped ≥0 and mass-scaled (so ``focal_mass_mask`` self-sizes to ≈|M|).
+
+    Model selection: ``select_on="val"`` (default) keeps the epoch with the lowest deficit loss on the
+    held-out ``cal_idx`` split (``cal_frac`` of N, never trained on); ``"train"`` uses the in-sample fit
+    loss. Prefer ``"val"`` for small cohorts — in-sample selection has no regularising stop, so it
+    overfits to a seed-dependent in-sample optimum and yields unstable, off-target maps. ``patience``
+    (epochs without held-out improvement before stopping) enables early stopping; ``None`` runs all
+    ``epochs`` and returns the best-scoring one. Falls back to ``"train"`` if no held-out split exists.
     """
+    if select_on not in ("val", "train"):
+        raise ValueError(f"select_on must be 'val' or 'train' (got {select_on!r})")
     torch.manual_seed(seed)
     dev = _pick_device(device)
     v_cov = int(X.shape[1])
@@ -286,11 +301,23 @@ def fit_conv_vae(
         if npos > 0:
             pos_weight = torch.tensor((len(y_fit) - npos) / npos, device=dev)
 
+    # Selection set: the held-out cal_idx for "val" (never trained on), else the fit set.
+    # cal_idx doubles as the rate-calibration set below; selecting the epoch on it then
+    # calibrating on it makes the binary rate mildly optimistic, but the MAP and its ranking
+    # (Dice@k) are unaffected — the rate is only a post-hoc threshold for the deployment mask.
+    use_val = select_on == "val" and len(cal_idx) >= 2
+    if use_val:
+        x_sel, y_sel = x_all[cal_idx], y_all[cal_idx]
+        cov_sel = None if cov_all is None else cov_all[cal_idx]
+    else:
+        x_sel, y_sel, cov_sel = x_fit, y_fit, cov_fit
+
     model = ConvLesionDeficitVAE(pad_shape, d_cov=d_cov, z_dim=z_dim, start_dims=start_dims,
                                  num_down=num_down, norm=norm).to(dev)
     opt = torch.optim.Adamax(model.parameters(), lr=lr, weight_decay=wd)
     best_ll = float("inf")
     best_state = copy.deepcopy(model.state_dict())
+    since_improved = 0
     for _ in range(epochs):
         model.train()
         order = torch.randperm(len(fit_idx), generator=gen).numpy()
@@ -304,23 +331,28 @@ def fit_conv_vae(
                             continuous=continuous, mask_weight=mask_weight, recon_weight=recon_weight)
             loss.backward()
             opt.step()
-        # Eval mask-BCE MINIBATCHED — a full-batch forward on all fit samples blows the
-        # activation memory (a 3D conv on the whole cohort is enormous); accumulate instead.
+        # Deficit loss on the SELECTION set, MINIBATCHED — a full-batch conv forward on the whole
+        # cohort blows the activation memory (a 3D conv on N volumes is enormous); accumulate instead.
         model.eval()
         with torch.no_grad():
             tot, nb = 0.0, 0
-            for start in range(0, len(fit_idx), batch):
-                xb, yb = x_fit[start:start + batch], y_fit[start:start + batch]
+            for start in range(0, len(y_sel), batch):
+                xb, yb = x_sel[start:start + batch], y_sel[start:start + batch]
                 if len(xb) < 2:
                     continue
-                cb = None if cov_fit is None else cov_fit[start:start + batch]
+                cb = None if cov_sel is None else cov_sel[start:start + batch]
                 _, mb = model(xb, cov_vol, yb, pos_weight, cov=cb, continuous=continuous)
                 tot += float(mb) * len(xb)
                 nb += len(xb)
         ll = tot / max(nb, 1)
-        if ll < best_ll:
+        if ll < best_ll - 1e-6:
             best_ll = ll
             best_state = copy.deepcopy(model.state_dict())
+            since_improved = 0
+        else:
+            since_improved += 1
+            if patience is not None and since_improved >= patience:
+                break
     model.load_state_dict(best_state)
     model.eval()
 
