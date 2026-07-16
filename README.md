@@ -36,8 +36,16 @@ comparing four methods **covariate-blind vs covariate-aware** on 512 real KCH st
 
 Headline: the **conv-VAE recovers the substrate best** (the 3D spatial prior beats the flat MLP and
 the classical methods), and **covariate-awareness helps it** while leaking the least confound bias —
-whereas the linear methods over-correct. Covariate control follows the standard **partialing-out**
-(residualize the behaviour on the covariates) rather than appending covariates as features.
+whereas the linear methods over-correct.
+
+**Two covariate-control mechanisms** (both legitimate; they differ in *where* the control happens):
+the **baselines** (VLSM/SVR-LSM) use classical **partialling-out** — residualize the behaviour on
+`[1, cov]` before fitting (`cov_mode="partial"`), the standard LSM confound control. The **VAEs**
+control covariates in the **deficit head**: `cov` enters only the head as a main effect (`cov·β`) and
+a substrate interaction (`(1 + cov·γ)` scaling the overlap), fitted jointly, while the encoder never
+sees `cov` — so the recovered substrate stays covariate-invariant. The head's main-effect term is
+asymptotically equivalent to partialling out the main effect (Frisch–Waugh–Lovell), done inside the
+model rather than as a pre-step, plus an interaction the pre-residualization can't express.
 
 The code is organised under `src/` — classical **baselines** and the **dlm** (deep-lesion-mapping)
 VAEs in their own subpackages; the notebook does `sys.path.insert(0, "src")` and imports them:
@@ -64,6 +72,34 @@ conv-VAE is GPU-trained, so its numbers are precomputed (a code snippet reproduc
 `aphasia_examples.ipynb` — worked examples for the two common clinical setups: a **binary classifier**
 (aphasia yes/no) and a **continuous severity regression**, covariate-aware (age + sex), featuring the
 conv-VAE, at 4 mm.
+
+**Relationship to the pre-print.** `src/dlm/conv_vae.py` (`fit_conv_vae`) is the maintained
+implementation and the one to build on — it keeps the pre-print's CoordConv / label-as-volume /
+joint-`P(X,Y)` conv architecture but adds the fixes this repo depends on: the identifiable two-arm
+`σ(γ)·w` (membership × importance) readout, the covariate deficit head, GroupNorm (batch-independent
+for the small per-episode batches), a continuous/severity head, coverage-restriction, and **held-out
+validation epoch selection** (`select_on="val"`, default). The last is important at small N: in-sample
+selection has no regularising stop and gives seed-unstable, off-target maps (see `fit_conv_vae`'s
+docstring). The pre-print's `model.py`/`train.py` predate these and are superseded here.
+
+### Model selection & bagging at small N
+
+When N is in the hundreds, two settings dominate map quality (both from a controlled 4 mm run — real
+KCH lesions, covariate-aware age/sex, N=512):
+
+- **Held-out epoch selection** (`select_on="val"`, default) beats in-sample selection: single-fit
+  Dice@k went **0.27 → 0.48** on the binary task (the continuous-severity task, already better-behaved,
+  was unchanged). In-sample selection has no regularising stop, so it drifts to a seed-dependent
+  optimum — worst on weak/binary outcomes.
+- **Bag several seeds.** A single val-selected fit gets noisier the weaker the outcome, so average the
+  per-seed maps and take the ensemble as the deliverable. Bagging raised split-half reproducibility
+  monotonically (**binary 0.81 → 0.98, severity 0.90 → 0.99** as the bag grew 1 → 8) and the 16-fit
+  ensemble was the most accurate; **held-out predictive validity was already high (AUC ≈ 0.90) and
+  flat** — bagging buys *reproducibility*, not raw predictivity. Most of the gain is by ~4 fits and
+  near-saturated by ~8. The honest stopping rule: **bag until split-half reproducibility and held-out
+  predictive validity plateau** — a weak binary *presence* label plateaus much later than a graded
+  severity score, so it needs more fits. To bag with the shipped scripts, run `aphasia_4mm.py` across
+  seeds (one per GPU via the SLURM array recipe above) and average the output substrate NIfTIs.
 
 Install: `pip install -r requirements-covariate.txt`.
 
@@ -142,9 +178,24 @@ srun python src/scripts/${CONFIGS[$SLURM_ARRAY_TASK_ID]} \
      --out substrate_${SLURM_ARRAY_TASK_ID}.nii.gz
 ```
 
-Sweeps over `--epochs`, `--min-overlap`, or bootstrap resamples parallelise the same way — vary the
-args per array index. (Within a single fit the conv-VAE already uses the whole GPU; parallelism buys
-you throughput *across* fits, not a faster individual fit.)
+Sweeps over `--epochs`, `--min-overlap`, or `--seed` parallelise the same way — vary the args per
+array index. (Within a single fit the conv-VAE already uses the whole GPU; parallelism buys you
+throughput *across* fits, not a faster individual fit.)
+
+**Bagging across seeds** (recommended at small N — see the model-selection note above). Fit one seed
+per GPU, then average the output NIfTIs into the ensemble map you actually report:
+
+```bash
+#SBATCH --array=0-15           # 16 seeds, one GPU each
+#SBATCH --gpus-per-task=1
+srun python src/scripts/aphasia_4mm.py --outcome binary --covariates age_sex.npy \
+     --labels y.npy --lesions 'lesions/*.nii.gz' --seed $SLURM_ARRAY_TASK_ID --patience 100
+# then, once all seeds finish, average them (this ensemble is the deliverable):
+python -c "import glob,nibabel as nib,numpy as np; \
+f=sorted(glob.glob('aphasia_4mm_binary_seed*.nii.gz')); i=[nib.load(x) for x in f]; \
+nib.save(nib.Nifti1Image(np.mean([x.get_fdata() for x in i],0).astype('f4'), i[0].affine), \
+'aphasia_4mm_binary_ensemble.nii.gz')"
+```
 
 > `covariate_substrate.ipynb` is an earlier **parcel-space** prototype of this tutorial; its shared
 > modules were refactored for the voxel version above, so it is superseded and won't run as-is.
