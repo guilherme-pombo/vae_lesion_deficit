@@ -54,6 +54,7 @@ def build_voxel_data(
     lesion_paths: list[str | Path],
     *,
     min_overlap: int = 10,
+    min_coverage_frac: float = 0.0,
     resolution_mm: int = 4,
     template: str | Path | None = None,
     substrate_paths: dict[str, str | Path] | None = None,
@@ -100,11 +101,15 @@ def build_voxel_data(
                      for p in lesion_paths])  # (N, *shape)
     n = vols.shape[0]
     touched = (vols > 0.0).sum(axis=0)  # (*shape,)
-    mask3d = touched >= int(min_overlap)
+    # coverage floor = the stricter of an absolute patient count and a fraction of N (mask-size /
+    # cohort-size invariant — e.g. min_coverage_frac=0.1 keeps voxels lesioned in >=10% of patients).
+    floor = max(int(min_overlap), int(np.ceil(min_coverage_frac * n)))
+    mask3d = touched >= floor
     if not mask3d.any():
         raise ValueError(
-            f"coverage mask empty at min_overlap={min_overlap} (max touch={int(touched.max())}); "
-            f"lower min_overlap or check the lesions are co-registered to the target grid"
+            f"coverage mask empty at floor={floor} patients (min_overlap={min_overlap}, "
+            f"min_coverage_frac={min_coverage_frac}, N={n}, max touch={int(touched.max())}); "
+            f"lower the floor or check the lesions are co-registered to the target grid"
         )
     mask_idx = np.flatnonzero(mask3d.reshape(-1))
     X = vols.reshape(n, -1)[:, mask_idx].astype(np.float32)

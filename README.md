@@ -77,16 +77,28 @@ conv-VAE, at 4 mm.
 implementation and the one to build on — it keeps the pre-print's CoordConv / label-as-volume /
 joint-`P(X,Y)` conv architecture but adds the fixes this repo depends on: the identifiable two-arm
 `σ(γ)·w` (membership × importance) readout, the covariate deficit head, GroupNorm (batch-independent
-for the small per-episode batches), a continuous/severity head, coverage-restriction, and **held-out
-validation epoch selection** (`select_on="val"`, default). The last is important at small N: in-sample
-selection has no regularising stop and gives seed-unstable, off-target maps (see `fit_conv_vae`'s
-docstring). The pre-print's `model.py`/`train.py` predate these and are superseded here.
+for the small per-episode batches), a continuous/severity head, coverage-restriction, a **mask-size-
+invariant loss** (`loss_norm="voxel_mean"`, default — per-voxel-mean reconstruction so one
+`mask_weight` transfers across mask sizes/resolutions), a **readout coverage floor**, and **held-out
+validation epoch selection** (`select_on="val"`, default). These matter most at small N (in-sample
+selection gives seed-unstable maps; a sum-reduced loss lets reconstruction swamp the deficit as the
+mask grows) — see `fit_conv_vae`'s docstring. The pre-print's `model.py`/`train.py` predate these.
 
 ### Model selection & bagging at small N
 
-When N is in the hundreds, two settings dominate map quality (both from a controlled 4 mm run — real
-KCH lesions, covariate-aware age/sex, N=512):
+When N is in the hundreds, a few settings dominate map quality (from controlled 4 mm + 2 mm runs — real
+KCH lesions, covariate-aware age/sex):
 
+- **`mask_weight` is mask-size-invariant** under the default `loss_norm="voxel_mean"` — the
+  reconstruction is a per-voxel mean, so the deficit isn't swamped as the mask grows. Verified: the
+  same `mask_weight` recovers the substrate at 4 mm (V_cov 2 541) *and* 2 mm (V_cov 20 542) on a flat
+  plateau (Dice@k 0.64–0.73 across `mask_weight` 1→10, always on left perisylvian cortex, beating VLSM
+  0.51–0.54 / SVR 0.51–0.55). **Use `mask_weight=3`** (mid-plateau). With the legacy `loss_norm="sum"`
+  you must instead scale `mask_weight` ∝ V_cov, which is the trap this replaces.
+- **Coverage floor** (`--coverage-floor 0.1`, i.e. `readout_coverage_frac=0.1`) — the `E[σ(γ)·w]`
+  readout is under-constrained on rarely-lesioned voxels and can spike there and capture the argmax;
+  the floor zeros voxels lesioned in < 10 % of patients. (For the analysis mask itself, `build_voxel_data`
+  takes `min_coverage_frac`.)
 - **Held-out epoch selection** (`select_on="val"`, default) beats in-sample selection: single-fit
   Dice@k went **0.27 → 0.48** on the binary task (the continuous-severity task, already better-behaved,
   was unchanged). In-sample selection has no regularising stop, so it drifts to a seed-dependent

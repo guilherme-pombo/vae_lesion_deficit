@@ -46,6 +46,13 @@ def run_aphasia(*, resolution_mm: int, conv_num_down: int, conv_batch: int,
     ap.add_argument("--patience", type=int, default=None,
                     help="early-stop patience (epochs w/o held-out improvement); default runs all "
                          "--epochs and keeps the best held-out epoch")
+    ap.add_argument("--coverage-floor", type=float, default=0.1,
+                    help="zero the recovered map on voxels lesioned in < this fraction of patients "
+                         "(stops the readout spiking on rarely-lesioned voxels; 0 disables)")
+    ap.add_argument("--mask-weight", type=float, default=3.0,
+                    help="deficit-vs-reconstruction weight. Mask-size-invariant under the default "
+                         "voxel_mean loss; 3 sits mid-plateau (verified 4mm & 2mm). Raise if the "
+                         "substrate looks under-learned/smeared")
     ap.add_argument("--out", default=None,
                     help="output NIfTI (default: aphasia_<res>mm_<outcome>_seed<seed>.nii.gz)")
     args = ap.parse_args(argv)
@@ -81,7 +88,8 @@ def run_aphasia(*, resolution_mm: int, conv_num_down: int, conv_batch: int,
           f"batch={conv_batch}, epochs={args.epochs}, patience={args.patience})", flush=True)
     smap = fit_conv_vae(data.X, y, mask_idx=data.mask_idx, vol_shape=data.vol_shape, cov=cov,
                         continuous=continuous, epochs=args.epochs, num_down=conv_num_down,
-                        batch=conv_batch, seed=args.seed, patience=args.patience)
+                        batch=conv_batch, seed=args.seed, patience=args.patience,
+                        mask_weight=args.mask_weight, readout_coverage_frac=args.coverage_floor)
 
     # 4. save the recovered substrate map as a NIfTI (+ score vs language if this is the demo)
     import nibabel as nib

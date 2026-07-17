@@ -153,7 +153,8 @@ class ConvLesionDeficitVAE(nn.Module):
     def forward(self, x_vol: torch.Tensor, cov_vol: torch.Tensor, y: torch.Tensor,
                 pos_weight: torch.Tensor | None, *, cov: torch.Tensor | None = None,
                 continuous: bool = False, mask_weight: float = 1.0,
-                recon_weight: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
+                recon_weight: float = 1.0, kl_weight: float = 1.0,
+                loss_norm: str = "voxel_mean") -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(total_loss, mask_bce)`` for a minibatch of scattered lesion volumes.
 
         ``x_vol`` is ``(B,1,*pad)``, ``cov_vol`` ``(1,1,*pad)`` the *coverage* mask (1 inside the
@@ -161,14 +162,22 @@ class ConvLesionDeficitVAE(nn.Module):
         ``cov`` ``(B, d_cov)`` are the covariates: they enter the deficit HEAD only (main effect
         ``beta`` + substrate interaction ``gamma``), never the conv encoder, so the ``E[σ(γ)·w]``
         substrate readout stays covariate-free (recovered controlling for the covariates).
-        ``mask_weight``/``recon_weight`` rebalance the loss — the reconstruction term (summed over
-        voxels) otherwise dwarfs the scalar deficit BCE, starving the inference map of substrate
-        gradient through the deep conv decoder; raising ``mask_weight`` (or lowering ``recon_weight``)
-        lets the deficit organise ``p·w``.
+
+        ``loss_norm`` controls the deficit-vs-reconstruction balance across mask sizes:
+
+        * ``"voxel_mean"`` (default) — the reconstruction is a **per-coverage-voxel mean** and the KL a
+          **per-latent-dim mean**, so both are O(1) regardless of ``V_cov``. The deficit is already a
+          per-patient scalar, so ``mask_weight`` is **mask-size-invariant**: one value transfers across
+          4 mm / 2 mm / disconnectome / streamline masks.
+        * ``"sum"`` (legacy) — reconstruction summed over coverage voxels and KL summed over latent
+          dims (the original behaviour). Here the reconstruction grows ∝ ``V_cov`` and swamps the scalar
+          deficit, so ``mask_weight`` must be scaled ∝ mask size (the pitfall this replaces).
+
+        ``mask_weight``/``recon_weight``/``kl_weight`` weight the deficit / reconstruction / KL terms.
         """
         mu, logvar = self.encode(self._inputs(x_vol, y))
         z = mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
-        kl = torch.sum(0.5 * (-logvar + torch.exp(logvar) + mu ** 2 - 1), dim=1)
+        kl_pe = 0.5 * (-logvar + torch.exp(logvar) + mu ** 2 - 1)  # (B, z_dim), per latent dim
         inf = self._decode(z[:, :self.half_z], self.inf_fc, self.inf_up, self.inf_head)
         p = torch.sigmoid(inf[:, 0:1])
         w = inf[:, 1:2]
@@ -185,9 +194,18 @@ class ConvLesionDeficitVAE(nn.Module):
             mask_ll = F.mse_loss(pred, y.view(-1, 1))
         else:
             mask_ll = F.binary_cross_entropy_with_logits(pred, y.view(-1, 1), pos_weight=pos_weight)
-        recon_ll = (F.binary_cross_entropy(recon, x_vol, reduction="none") * cov_vol).sum(
-            dim=(-4, -3, -2, -1)).mean()
-        total = mask_weight * mask_ll + recon_weight * recon_ll + kl.mean()
+
+        recon_vox = (F.binary_cross_entropy(recon, x_vol, reduction="none") * cov_vol).sum(
+            dim=(-4, -3, -2, -1))  # (B,) reconstruction summed over coverage voxels
+        if loss_norm == "voxel_mean":
+            recon_ll = (recon_vox / denom).mean()   # per-coverage-voxel mean → mask-size invariant
+            kl_term = kl_pe.mean()                   # per-latent-dim mean
+        elif loss_norm == "sum":
+            recon_ll = recon_vox.mean()             # legacy: sum over voxels (∝ V_cov)
+            kl_term = kl_pe.sum(dim=1).mean()        # legacy: sum over latent dims
+        else:
+            raise ValueError(f"loss_norm must be 'voxel_mean' or 'sum' (got {loss_norm!r})")
+        total = mask_weight * mask_ll + recon_weight * recon_ll + kl_weight * kl_term
         return total, mask_ll
 
     @torch.no_grad()
@@ -235,6 +253,9 @@ def fit_conv_vae(
     wd: float = 1e-4,
     mask_weight: float = 1.0,
     recon_weight: float = 1.0,
+    kl_weight: float = 1.0,
+    loss_norm: str = "voxel_mean",
+    readout_coverage_frac: float = 0.0,
     balanced: bool = True,
     cal_frac: float = 0.2,
     select_on: str = "val",
@@ -261,6 +282,11 @@ def fit_conv_vae(
     overfits to a seed-dependent in-sample optimum and yields unstable, off-target maps. ``patience``
     (epochs without held-out improvement before stopping) enables early stopping; ``None`` runs all
     ``epochs`` and returns the best-scoring one. Falls back to ``"train"`` if no held-out split exists.
+
+    ``readout_coverage_frac`` (0 = off) zeros the recovered map on voxels lesioned in fewer than that
+    fraction of patients: the ``E[σ(γ)·w]`` readout is under-constrained on marginal-coverage voxels
+    (little deficit gradient reaches them) and can spike there, so a small floor (e.g. 0.1) stops rare
+    voxels capturing the argmax — recommended at high bag counts.
     """
     if select_on not in ("val", "train"):
         raise ValueError(f"select_on must be 'val' or 'train' (got {select_on!r})")
@@ -328,7 +354,8 @@ def fit_conv_vae(
             opt.zero_grad()
             cb = None if cov_fit is None else cov_fit[chunk]
             loss, _ = model(x_fit[chunk], cov_vol, y_fit[chunk], pos_weight, cov=cb,
-                            continuous=continuous, mask_weight=mask_weight, recon_weight=recon_weight)
+                            continuous=continuous, mask_weight=mask_weight, recon_weight=recon_weight,
+                            kl_weight=kl_weight, loss_norm=loss_norm)
             loss.backward()
             opt.step()
         # Deficit loss on the SELECTION set, MINIBATCHED — a full-batch conv forward on the whole
@@ -367,6 +394,13 @@ def fit_conv_vae(
     eff = (eff_sum / max(n_seen, 1)).cpu().numpy()  # (*pad)
     eff = eff[: vol_shape[0], : vol_shape[1], : vol_shape[2]].reshape(-1)[mask_idx]
     scores = eff.astype(np.float64)
+    if readout_coverage_frac > 0.0:
+        # Zero the readout on marginal-coverage voxels: the E[σ(γ)·w] map is under-constrained where
+        # few patients are lesioned (little deficit gradient), so it can spike there and capture the
+        # argmax. Drop voxels lesioned in < readout_coverage_frac of patients (a coverage floor on the
+        # readout, distinct from the analysis-mask floor).
+        cov_frac = (Xn > 0.0).mean(axis=0)  # (V_cov,) per-voxel lesion coverage fraction
+        scores = np.where(cov_frac >= readout_coverage_frac, scores, 0.0)
     if len(cal_idx) > 0 and not continuous:
         rate = _learn_substrate_rate(scores, Xn[cal_idx], Yn[cal_idx], q_lo=q_lo, q_hi=q_hi, q_n=q_n)
     else:
