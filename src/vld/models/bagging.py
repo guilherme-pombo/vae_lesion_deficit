@@ -25,8 +25,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from dlm.conv_vae import fit_conv_vae
-from metrics import focal_mass_mask
+from vld.metrics import focal_mass_mask
+
+from .conv_vae import fit_conv_vae
 
 
 @dataclass(frozen=True)

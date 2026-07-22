@@ -4,8 +4,8 @@ Turns a folder of MNI-registered binary lesion masks into the coverage-restricte
 methods consume, on a 4 mm MNI grid by default (the same grid as the shipped sample, so results are
 comparable). This is the missing link between raw imaging and ``fit_conv_vae`` / ``fit_parcel_vae``:
 
-    from build_voxel import build_voxel_data
-    from dlm.conv_vae import fit_conv_vae
+    from vld.data.build_voxel import build_voxel_data
+    from vld.models.conv_vae import fit_conv_vae
     data = build_voxel_data(sorted(glob("lesions/*.nii.gz")), min_overlap=10)
     smap = fit_conv_vae(data.X, y, mask_idx=data.mask_idx, vol_shape=data.vol_shape, cov=cov)
 
@@ -21,7 +21,7 @@ import nibabel as nib
 import numpy as np
 from nibabel.processing import resample_from_to
 
-from voxel_data import VoxelData
+from .voxel_data import VoxelData
 
 # Default target grid: 4 mm MNI, matching the shipped voxel_ds.npz sample.
 MNI_4MM_SHAPE: tuple[int, int, int] = (46, 55, 46)

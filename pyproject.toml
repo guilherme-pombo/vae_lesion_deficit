@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vae-lesion-deficit"
 version = "0.1.0"
@@ -8,6 +12,7 @@ dependencies = [
     "numpy>=1.24",
     "torch>=2.0",
     "scikit-learn>=1.2",
+    "scipy>=1.10",
     "matplotlib>=3.6",
     "nibabel>=5.0",
 ]
@@ -18,8 +23,14 @@ notebook = [
     "jupyterlab>=4",
     "ipykernel>=6",
 ]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.uv]
-# The code is used from src/ (the notebooks do sys.path.insert(0, "src")); uv just manages the
-# environment and dependencies rather than building/installing this repo as a package.
-package = false
+# The vld package lives under src/ and is installed editable (`uv pip install -e .` / `pip install -e .`).
+package = true
