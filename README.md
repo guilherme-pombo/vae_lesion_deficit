@@ -211,3 +211,19 @@ nib.save(nib.Nifti1Image(np.mean([x.get_fdata() for x in i],0).astype('f4'), i[0
 
 > `covariate_substrate.ipynb` is an earlier **parcel-space** prototype of this tutorial; its shared
 > modules were refactored for the voxel version above, so it is superseded and won't run as-is.
+
+## Bagging (calibrated consensus)
+
+A single conv-VAE fit is high-variance. `bagging.fit_conv_vae_bagged` bags several fits into a
+low-variance substrate — but instead of averaging raw maps, it **binarises each seed at its own
+held-out-calibrated size** (`metrics.focal_mass_mask`) and then averages the binaries into a per-voxel
+consensus. This calibrate-per-seed-then-ensemble order is the point (see `SUBSTRATE_BAGGING.md`).
+
+```python
+import sys; sys.path.insert(0, "src")
+from bagging import fit_conv_vae_bagged
+res = fit_conv_vae_bagged(X, y, mask_idx=mask_idx, vol_shape=vol_shape, n_bag=8,
+                          cov=cov, readout_coverage_frac=0.1)
+res.consensus_mask       # deployed substrate (V_cov,)
+res.consensus_fraction   # per-voxel seed agreement in [0, 1]
+```
