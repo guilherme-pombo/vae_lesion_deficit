@@ -11,19 +11,14 @@ from __future__ import annotations
 
 import argparse
 import glob
-import sys
 from pathlib import Path
 
 import numpy as np
 
-_SRC = Path(__file__).resolve().parents[1]   # .../src
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
-
-from build_voxel import build_voxel_data           # noqa: E402
-from dlm.conv_vae import fit_conv_vae              # noqa: E402
-from metrics import dice, dice_at_k, focal_mass_mask  # noqa: E402
-from voxel_data import VoxelData                   # noqa: E402
+from vld.data.build_voxel import build_voxel_data
+from vld.data.voxel_data import VoxelData
+from vld.metrics import dice, dice_at_k, focal_mass_mask
+from vld.models.conv_vae import fit_conv_vae
 
 
 def run_aphasia(*, resolution_mm: int, conv_num_down: int, conv_batch: int,
