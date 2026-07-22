@@ -1,13 +1,6 @@
-import sys
-from pathlib import Path
-
 import numpy as np
 
-_SRC = Path(__file__).resolve().parent.parent / "src"
-if str(_SRC) not in sys.path:
-    sys.path.insert(0, str(_SRC))
-
-from bagging import BaggedSubstrate, consensus_substrate, fit_conv_vae_bagged  # noqa: E402
+from vld.models.bagging import BaggedSubstrate, consensus_substrate, fit_conv_vae_bagged
 
 
 def test_consensus_fraction_and_agreement():
