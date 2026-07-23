@@ -85,9 +85,15 @@ class ConvLesionDeficitVAE(nn.Module):
     """
 
     def __init__(self, pad_shape: tuple[int, int, int], *, d_cov: int = 0, z_dim: int = 128,
-                 start_dims: int = 16, num_down: int = 3, norm: str = "gn") -> None:
+                 start_dims: int = 16, num_down: int = 3, norm: str = "gn",
+                 cond_prior_dim: int = 0) -> None:
         super().__init__()
         self.pad_shape = pad_shape
+        # iVAE (Khemakhem et al. 2020): with cond_prior_dim>0 the prior is p(z|u)=N(mu(u), diag exp(lv(u)))
+        # with u the auxiliary (here the deficit y). The standard N(0,I) prior identifies the latent only
+        # up to an equivalence class; a prior modulated by u makes it identifiable given u, which markedly
+        # improves substrate recovery (KL in forward switches to the analytic Gaussian KL(q||p(z|u))).
+        self.cond_prior_dim = int(cond_prior_dim)
         self.num_down = num_down
         self.half_z = z_dim // 2
         self.d_cov = int(d_cov)
@@ -107,6 +113,9 @@ class ConvLesionDeficitVAE(nn.Module):
         self.dense = self.top_ch * int(np.prod(self.latent_grid))
         self.mu = nn.Linear(self.dense, z_dim)
         self.logvar = nn.Linear(self.dense, z_dim)
+        if self.cond_prior_dim > 0:  # iVAE conditional prior network: u -> (mu_p, logvar_p)
+            self.prior_net = nn.Sequential(nn.Linear(self.cond_prior_dim, 64), nn.GELU(),
+                                           nn.Linear(64, 2 * z_dim))
 
         self.inf_fc = nn.Sequential(nn.Linear(self.half_z, self.dense), nn.GELU())
         self.rec_fc = nn.Sequential(nn.Linear(self.half_z, self.dense), nn.GELU())
@@ -177,7 +186,13 @@ class ConvLesionDeficitVAE(nn.Module):
         """
         mu, logvar = self.encode(self._inputs(x_vol, y))
         z = mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
-        kl_pe = 0.5 * (-logvar + torch.exp(logvar) + mu ** 2 - 1)  # (B, z_dim), per latent dim
+        if self.cond_prior_dim > 0:  # iVAE: KL(q(z|x,y) || p(z|u)), u = deficit y; analytic Gaussian
+            pp = self.prior_net(y.view(-1, 1))
+            mu_p, logvar_p = pp[:, : mu.size(1)], pp[:, mu.size(1):]
+            kl_pe = 0.5 * (logvar_p - logvar
+                           + (torch.exp(logvar) + (mu - mu_p) ** 2) * torch.exp(-logvar_p) - 1)
+        else:
+            kl_pe = 0.5 * (-logvar + torch.exp(logvar) + mu ** 2 - 1)  # (B, z_dim), vs N(0,I)
         inf = self._decode(z[:, :self.half_z], self.inf_fc, self.inf_up, self.inf_head)
         p = torch.sigmoid(inf[:, 0:1])
         w = inf[:, 1:2]
@@ -247,6 +262,7 @@ def fit_conv_vae(
     start_dims: int = 16,
     num_down: int = 3,
     norm: str = "gn",
+    identifiable: bool = False,
     epochs: int = 300,
     batch: int = 64,
     lr: float = 2e-3,
@@ -339,7 +355,8 @@ def fit_conv_vae(
         x_sel, y_sel, cov_sel = x_fit, y_fit, cov_fit
 
     model = ConvLesionDeficitVAE(pad_shape, d_cov=d_cov, z_dim=z_dim, start_dims=start_dims,
-                                 num_down=num_down, norm=norm).to(dev)
+                                 num_down=num_down, norm=norm,
+                                 cond_prior_dim=(1 if identifiable else 0)).to(dev)
     opt = torch.optim.Adamax(model.parameters(), lr=lr, weight_decay=wd)
     best_ll = float("inf")
     best_state = copy.deepcopy(model.state_dict())
