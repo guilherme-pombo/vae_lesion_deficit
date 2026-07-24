@@ -69,4 +69,47 @@ def leakage(score_map: np.ndarray, m_binary: np.ndarray, exposure: np.ndarray) -
     return float(np.corrcoef(s, e)[0, 1])
 
 
-__all__ = ["dice", "dice_at_k", "focal_mass_mask", "age_exposure", "leakage"]
+def support_auc(score_map: np.ndarray, m_binary: np.ndarray) -> float:
+    """Threshold-free recovery quality: AUC of ``score_map`` for separating substrate from non-substrate.
+
+    Unlike :func:`dice_at_k` this needs no size assumption, so it compares estimators whose maps have very
+    different sparsity (a diffuse ridge map and a sparse VAE map score on the same footing). Computed via
+    the rank identity for the Mann-Whitney statistic, so it adds no dependency.
+
+    Returns 0.5 when either class is empty.
+    """
+    s = np.asarray(score_map, dtype=np.float64).ravel()
+    m = np.asarray(m_binary).ravel() > 0.5
+    n_pos, n_neg = int(m.sum()), int((~m).sum())
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+    order = np.argsort(s, kind="mergesort")
+    ranks = np.empty(len(s), dtype=np.float64)
+    ranks[order] = np.arange(1, len(s) + 1, dtype=np.float64)
+    # average ranks within ties, so the statistic stays well defined for maps with flat regions
+    _, inverse, counts = np.unique(s, return_inverse=True, return_counts=True)
+    ranks = (np.bincount(inverse, weights=ranks) / counts)[inverse]
+    return float((ranks[m].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def morans_i(score_map: np.ndarray, adjacency: object) -> float:
+    """Moran's I — spatial autocorrelation of a map over a voxel adjacency graph.
+
+    Report this alongside any reproducibility claim about a spatially-regularised estimator: smoothing
+    raises split-half agreement *mechanically* (fewer effective degrees of freedom), so a stability gain
+    only means something against a smoothness-matched comparison. Pass the graph from
+    :func:`vld.priors.voxel_adjacency`.
+
+    Returns NaN for a constant map or an empty graph.
+    """
+    w = np.asarray(score_map, dtype=np.float64).ravel()
+    z = w - w.mean()
+    denom = float((z ** 2).sum())
+    weight_total = float(adjacency.sum())
+    if denom < 1e-20 or weight_total <= 0.0:
+        return float("nan")
+    return float(len(w) * float((z * (adjacency @ z)).sum()) / (weight_total * denom))
+
+
+__all__ = ["dice", "dice_at_k", "focal_mass_mask", "age_exposure", "leakage",
+           "support_auc", "morans_i"]
