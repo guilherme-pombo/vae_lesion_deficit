@@ -34,10 +34,12 @@ src/vld/
   baselines/  vlsm.py (vlsm_stat/vlsm_binary)  svr_lsm.py (svr_weights/svr_binary)  _common.py
   data/       voxel_data.py (VoxelData)  build_voxel.py (build_voxel_data — NIfTI → VoxelData)
   deficits/   deficits.py (covariate benchmark generator)  aphasia_deficits.py
-  metrics.py  dice, dice_at_k, focal_mass_mask, age_exposure, leakage
-  scripts/    aphasia_4mm.py  aphasia_2mm.py  _aphasia_train.py
+  priors/     spatial.py (LaplacianInverse, fit_laplacian_substrate — spatially-coherent
+              substrate estimation; voxel_adjacency / voxel_laplacian)
+  metrics.py  dice, dice_at_k, focal_mass_mask, support_auc, morans_i, age_exposure, leakage
+  scripts/    aphasia_4mm.py  aphasia_2mm.py  _aphasia_train.py  spatial_prior_demo.py
 notebooks/    covariate_voxel.ipynb  aphasia_examples.ipynb  aphasia_confounds.ipynb  assets/
-docs/         covariate_tutorial_spec.md  SUBSTRATE_BAGGING.md
+docs/         covariate_tutorial_spec.md  SUBSTRATE_BAGGING.md  SPATIAL_PRIOR.md
 voxel_data_sample/   the shipped 4 mm / 2 mm demo samples (voxel_ds.npz, voxel_ds_2mm.npz)
 legacy/       superseded 2D-toy / parcel-space prototypes (see legacy/README.md)
 ```
@@ -138,6 +140,38 @@ res = fit_conv_vae_bagged(X, y, mask_idx=mask_idx, vol_shape=vol_shape, n_bag=8,
 res.consensus_mask       # deployed substrate (V_cov,)
 res.consensus_fraction   # per-voxel seed agreement in [0, 1]
 ```
+
+## Spatially-coherent substrates (and why prediction is the wrong yardstick)
+
+Lesion-deficit mapping is an ill-posed inverse problem — with K ≫ N voxels the penalty, not the data,
+decides the map. Ridge penalises `‖w‖²`, which treats neighbouring voxels as unrelated; penalising
+*roughness* instead (`wᵀLw`, with `L` the voxel graph Laplacian) says neighbouring voxels should agree.
+That is the LORETA penalty family from EEG source localisation, underdetermined in the same way.
+
+It matters because **ridge is the best of these estimators at held-out prediction and the worst at
+recovering the substrate**. On the shipped sample cohort with a planted ground truth, ridge has the highest
+out-of-fold ρ and the lowest support-AUC in all six tested conditions, while every smoothing weight in a
+broad range beats it on recovery by +0.09 to +0.25 AUC. Tuning a substrate on prediction picks a worse map.
+
+```python
+from vld.priors import LaplacianInverse, fit_laplacian_substrate
+from vld.metrics import morans_i, support_auc
+
+w = fit_laplacian_substrate(X, y, mask_idx=mask_idx, vol_shape=vol_shape, beta=100.0, cov=cov)
+
+# sweeping beta / folds / bootstraps: build once, fit many times (one sparse factorisation)
+solver = LaplacianInverse(X, mask_idx=mask_idx, vol_shape=vol_shape, beta=100.0, cov=cov)
+half = solver.fit(y[idx], rows=idx)
+```
+
+```bash
+python -m vld.scripts.spatial_prior_demo        # reproduces the benchmark table
+```
+
+Two cautions, both covered in `docs/SPATIAL_PRIOR.md`: smoothing inflates split-half stability
+*mechanically*, so report `morans_i` alongside any reproducibility claim and compare at matched smoothness;
+and the prior adds no information — it makes better use of what the cohort constrains rather than
+enlarging it, so significance testing must push the null through the same estimator and prior.
 
 ## Ready-to-run training scripts
 
