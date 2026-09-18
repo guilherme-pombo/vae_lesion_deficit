@@ -2,7 +2,7 @@
 
 Lesion-deficit substrate recovery in voxel space — VLSM and SVR-LSM baselines, two-arm VAEs (MLP and
 3D-convolutional) with a covariate-aware deficit head, and calibrated bagging. Everything runs with
-**numpy / torch / scikit-learn / nibabel** only — no cloud/infra dependency.
+**numpy / torch / scikit-learn / scipy / matplotlib / nibabel** only — no cloud/infra dependency.
 
 Start with `notebooks/covariate_voxel.ipynb` (method comparison) or `notebooks/aphasia_examples.ipynb`
 (clinical worked examples).
